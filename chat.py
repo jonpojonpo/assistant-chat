@@ -9,6 +9,7 @@ from prompt_toolkit import PromptSession
 from prompt_toolkit.history import FileHistory
 import time
 import json
+import subprocess
 
 # Load environment variables from .env file
 load_dotenv()
@@ -30,12 +31,49 @@ client = openai.OpenAI()
 # Other parts of your script, including argument parsing and main logic
 # ...
 
+def execute_function_call(client, thread_id, run_id, function_calls):
+    """
+    Execute function calls requested by the assistant.
+    """
+    tool_outputs = []
+
+    for call in function_calls:
+        if call.function.name == "exec_shell_cmd":
+            # Parse the arguments string into a dictionary
+            arguments = json.loads(call.function.arguments)
+
+            # Extract the command to be executed
+            command = arguments["command"]
+            print("CMD:>" + command)
+            # Execute the command and capture the output
+            process = subprocess.Popen(command, shell=True, stdout=subprocess.PIPE, stderr=subprocess.PIPE)
+            stdout, stderr = process.communicate()
+
+            # Concatenate stdout and stderr into a single string
+            output = stdout.decode() + "\n" + stderr.decode()
+            print("OUT:>" + output)
+            # Create a response for the function call
+            response = {
+                "tool_call_id": call.id,
+                "output": output
+            }
+            tool_outputs.append(response)
+
+    # Submit the function call responses
+    client.beta.threads.runs.submit_tool_outputs(
+        thread_id=thread_id,
+        run_id=run_id,
+        tool_outputs=tool_outputs
+    )
+
 def wait_on_run(run, thread):
     while run.status == "queued" or run.status == "in_progress":
         run = client.beta.threads.runs.retrieve(
             thread_id=thread.id,
             run_id=run.id,
         )
+        #print(show_json(run))
+        print(".")
         time.sleep(0.5)
     return run
 
@@ -79,6 +117,12 @@ def main():
         )
 
         run = wait_on_run(run, thread)
+        # Check if the run requires action (function calls)
+        if run.status == "requires_action":
+            # Execute the required function calls
+            tool_calls = run.required_action.submit_tool_outputs.tool_calls
+            execute_function_call(client, thread.id, run.id, tool_calls)
+            run = wait_on_run(run, thread)
 
         run = client.beta.threads.runs.retrieve(
             thread_id=thread.id,
